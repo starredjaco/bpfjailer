@@ -296,6 +296,7 @@ static __always_inline struct bpfj_event* bpfj_event_reserve(
   ev->pid = task->tgid;
   ev->tid = task->pid;
   ev->timestamp_ns = bpf_ktime_get_ns();
+  __builtin_memset(&ev->fs_trace, 0, sizeof(ev->fs_trace));
   return ev;
 }
 

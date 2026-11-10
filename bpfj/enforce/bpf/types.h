@@ -216,13 +216,30 @@ struct bpfj_pod {
   const struct bpfj_role_policy __arena* policy;
 };
 
+struct bpfj_event_fs_trace {
+  __u64 tokens;
+  __u8 reason;
+  __u8 version;
+  __u8 len;
+  __u8 reserved[5];
+};
+
 struct bpfj_event {
   enum bpfj_event_type type;
   struct bpfj_pod pod;
   __u32 pid;
   __u32 tid;
   __u64 timestamp_ns;
+  struct bpfj_event_fs_trace fs_trace;
 };
+
+#ifdef __cplusplus
+static_assert(sizeof(struct bpfj_event_fs_trace) == 16);
+#else
+_Static_assert(
+    sizeof(struct bpfj_event_fs_trace) == 16,
+    "filesystem event trace layout is part of the ring-buffer ABI");
+#endif
 
 // Which role owns a BPF map or program, keyed in bpfj_bpf_map_owners and
 // bpfj_bpf_prog_owners by the object's kernel address. The id cannot be the

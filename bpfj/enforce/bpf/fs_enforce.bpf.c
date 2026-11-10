@@ -32,6 +32,22 @@ static __always_inline bool bpfj_fs_mode_allowed(__u32 granted, __u32 wanted) {
   return true;
 }
 
+static __always_inline void bpfj_fs_submit_event(
+    struct bpfj_pod __arena* pod,
+    struct task_struct* task,
+    enum bpfj_fs_reason reason,
+    enum bpfj_fs_trace_token terminal) {
+  struct bpfj_event* event = bpfj_event_reserve(BPFJ_EVENT_FS, pod, task);
+  if (event) {
+    event->fs_trace.tokens =
+        (__u64)BPFJ_FS_TRACE_MATCH | ((__u64)terminal << 8);
+    event->fs_trace.reason = (__u8)reason;
+    event->fs_trace.version = BPFJ_FS_TRACE_VERSION;
+    event->fs_trace.len = 2;
+  }
+  bpfj_event_submit(event);
+}
+
 static __noinline bool bpfj_fs_match_allowed(
     struct bpfj_file_match_cached_state __arena* state,
     __u32 wanted,
@@ -60,7 +76,8 @@ static __noinline bool bpfj_fs_match_allowed(
 // loop is ordinarily one iteration and is unrolled rather than expressed with
 // bpf_for: file_match_cached itself uses bpf_for and those iterators must never
 // be nested.
-static __always_inline int bpfj_fs_enforce(uintptr_t dentry, __u32 wanted) {
+static __always_inline int
+bpfj_fs_enforce(uintptr_t dentry, __u32 wanted, enum bpfj_fs_reason reason) {
   struct task_struct* task = bpf_get_current_task_btf();
   struct bpfj_pid_data* pidData = bpfj_get_current_pid_data();
   if (!task || !pidData || !dentry) {
@@ -108,8 +125,7 @@ static __always_inline int bpfj_fs_enforce(uintptr_t dentry, __u32 wanted) {
           bpfj_file_match_cached_bind_var_array,
           &pod->var_array);
       if (count == -E2BIG) {
-        struct bpfj_event* event = bpfj_event_reserve(BPFJ_EVENT_FS, pod, task);
-        bpfj_event_submit(event);
+        bpfj_fs_submit_event(pod, task, reason, BPFJ_FS_TRACE_TOO_DEEP);
         BPFJ_LOG("Denied filesystem access: path exceeds matcher limit");
         return -EACCES;
       }
@@ -117,10 +133,22 @@ static __always_inline int bpfj_fs_enforce(uintptr_t dentry, __u32 wanted) {
       if (count < 0 && count != -EXDEV) {
         BPFJ_LOG_ERR(-count, "filesystem path match failed");
       }
+      if (!allowed) {
+        if (count == 0) {
+          bpfj_fs_submit_event(pod, task, reason, BPFJ_FS_TRACE_NO_MATCH);
+        } else if (count == -EXDEV) {
+          bpfj_fs_submit_event(pod, task, reason, BPFJ_FS_TRACE_EXDEV_DENY);
+        } else if (count < 0) {
+          bpfj_fs_submit_event(pod, task, reason, BPFJ_FS_TRACE_MATCH_ERROR);
+        } else {
+          bpfj_fs_submit_event(pod, task, reason, BPFJ_FS_TRACE_PERM_DENY);
+        }
+        BPFJ_LOG("Denied filesystem access for role %s", role.id);
+        return -EACCES;
+      }
     }
     if (!allowed) {
-      struct bpfj_event* event = bpfj_event_reserve(BPFJ_EVENT_FS, pod, task);
-      bpfj_event_submit(event);
+      bpfj_fs_submit_event(pod, task, reason, BPFJ_FS_TRACE_NO_MATCH);
       BPFJ_LOG("Denied filesystem access for role %s", role.id);
       return -EACCES;
     }
@@ -131,8 +159,8 @@ static __always_inline int bpfj_fs_enforce(uintptr_t dentry, __u32 wanted) {
   return 0;
 }
 
-#define BPFJ_FS_CHECK(_dentry, _mode) \
-  bpfj_fs_enforce(bpfj_ptr_to_scalar(_dentry), _mode)
+#define BPFJ_FS_CHECK(_dentry, _mode, _reason) \
+  bpfj_fs_enforce(bpfj_ptr_to_scalar(_dentry), _mode, _reason)
 
 SEC("lsm/file_open")
 int BPF_PROG(bpfj_fs_file_open, struct file* file, int lsm_ret) {
@@ -142,7 +170,8 @@ int BPF_PROG(bpfj_fs_file_open, struct file* file, int lsm_ret) {
   return BPFJ_FS_CHECK(
       bpf_core_cast((file), typeof(*(file)))->f_path.dentry,
       bpf_core_cast((file), typeof(*(file)))->f_mode &
-          (FMODE_READ | FMODE_WRITE));
+          (FMODE_READ | FMODE_WRITE),
+      BPFJ_FS_REASON_OPEN);
 }
 
 SEC("lsm/inode_unlink")
@@ -154,7 +183,7 @@ int BPF_PROG(
   if (lsm_ret) {
     return lsm_ret;
   }
-  int ret = BPFJ_FS_CHECK(dentry, FMODE_WRITE);
+  int ret = BPFJ_FS_CHECK(dentry, FMODE_WRITE, BPFJ_FS_REASON_UNLINK);
   if (ret) {
     return ret;
   }
@@ -171,7 +200,7 @@ int BPFJ_LSM_INODE_PROG(
   if (lsm_ret) {
     return lsm_ret;
   }
-  int ret = BPFJ_FS_CHECK(new_dentry, FMODE_WRITE);
+  int ret = BPFJ_FS_CHECK(new_dentry, FMODE_WRITE, BPFJ_FS_REASON_LINK_NEW);
   if (ret) {
     return ret;
   }
@@ -185,7 +214,9 @@ int BPFJ_LSM_INODE_PROG(
     struct inode* dir,
     struct dentry* new_dentry,
     int lsm_ret) {
-  return lsm_ret ? lsm_ret : BPFJ_FS_CHECK(old_dentry, FMODE_WRITE);
+  return lsm_ret
+      ? lsm_ret
+      : BPFJ_FS_CHECK(old_dentry, FMODE_WRITE, BPFJ_FS_REASON_LINK_OLD);
 }
 
 SEC("lsm/inode_create")
@@ -195,7 +226,8 @@ int BPFJ_LSM_INODE_PROG(
     struct dentry* dentry,
     umode_t mode,
     int lsm_ret) {
-  return lsm_ret ? lsm_ret : BPFJ_FS_CHECK(dentry, FMODE_WRITE);
+  return lsm_ret ? lsm_ret
+                 : BPFJ_FS_CHECK(dentry, FMODE_WRITE, BPFJ_FS_REASON_CREATE);
 }
 
 SEC("lsm/inode_mknod")
@@ -206,7 +238,8 @@ int BPFJ_LSM_INODE_PROG(
     umode_t mode,
     dev_t dev,
     int lsm_ret) {
-  return lsm_ret ? lsm_ret : BPFJ_FS_CHECK(dentry, FMODE_WRITE);
+  return lsm_ret ? lsm_ret
+                 : BPFJ_FS_CHECK(dentry, FMODE_WRITE, BPFJ_FS_REASON_MKNOD);
 }
 
 SEC("lsm/inode_rename")
@@ -220,7 +253,7 @@ int BPF_PROG(
   if (lsm_ret) {
     return lsm_ret;
   }
-  int ret = BPFJ_FS_CHECK(old_dentry, FMODE_WRITE);
+  int ret = BPFJ_FS_CHECK(old_dentry, FMODE_WRITE, BPFJ_FS_REASON_RENAME_OLD);
   if (ret) {
     return ret;
   }
@@ -241,7 +274,8 @@ int BPF_PROG(
   }
   int ret = BPFJ_FS_CHECK(
       bpf_core_cast((new_dentry), typeof(*(new_dentry)))->d_parent,
-      FMODE_WRITE);
+      FMODE_WRITE,
+      BPFJ_FS_REASON_RENAME_NEW);
   if (ret) {
     return ret;
   }
@@ -258,7 +292,7 @@ int BPF_PROG(
   if (lsm_ret) {
     return lsm_ret;
   }
-  int ret = BPFJ_FS_CHECK(dentry, FMODE_WRITE);
+  int ret = BPFJ_FS_CHECK(dentry, FMODE_WRITE, BPFJ_FS_REASON_RMDIR);
   if (ret) {
     return ret;
   }
@@ -272,10 +306,11 @@ int BPFJ_LSM_INODE_PROG(
     struct dentry* dentry,
     umode_t mode,
     int lsm_ret) {
-  return lsm_ret
-      ? lsm_ret
-      : BPFJ_FS_CHECK(
-            bpf_core_cast((dentry), typeof(*(dentry)))->d_parent, FMODE_WRITE);
+  return lsm_ret ? lsm_ret
+                 : BPFJ_FS_CHECK(
+                       bpf_core_cast((dentry), typeof(*(dentry)))->d_parent,
+                       FMODE_WRITE,
+                       BPFJ_FS_REASON_MKDIR);
 }
 
 SEC("lsm/inode_setattr")
@@ -285,15 +320,17 @@ int BPF_PROG(
     struct dentry* dentry,
     struct iattr* attr,
     int lsm_ret) {
-  return lsm_ret ? lsm_ret : BPFJ_FS_CHECK(dentry, FMODE_WRITE);
+  return lsm_ret ? lsm_ret
+                 : BPFJ_FS_CHECK(dentry, FMODE_WRITE, BPFJ_FS_REASON_SETATTR);
 }
 
 SEC("lsm/inode_getattr")
 int BPF_PROG(bpfj_fs_inode_getattr, const struct path* path, int lsm_ret) {
-  return lsm_ret
-      ? lsm_ret
-      : BPFJ_FS_CHECK(
-            bpf_core_cast((path), typeof(*(path)))->dentry, FMODE_READ);
+  return lsm_ret ? lsm_ret
+                 : BPFJ_FS_CHECK(
+                       bpf_core_cast((path), typeof(*(path)))->dentry,
+                       FMODE_READ,
+                       BPFJ_FS_REASON_GETATTR);
 }
 
 SEC("lsm/inode_setxattr")
@@ -306,7 +343,8 @@ int BPF_PROG(
     size_t size,
     int flags,
     int lsm_ret) {
-  return lsm_ret ? lsm_ret : BPFJ_FS_CHECK(dentry, FMODE_WRITE);
+  return lsm_ret ? lsm_ret
+                 : BPFJ_FS_CHECK(dentry, FMODE_WRITE, BPFJ_FS_REASON_SETXATTR);
 }
 
 SEC("lsm/inode_getxattr")
@@ -315,12 +353,14 @@ int BPF_PROG(
     struct dentry* dentry,
     const char* name,
     int lsm_ret) {
-  return lsm_ret ? lsm_ret : BPFJ_FS_CHECK(dentry, FMODE_READ);
+  return lsm_ret ? lsm_ret
+                 : BPFJ_FS_CHECK(dentry, FMODE_READ, BPFJ_FS_REASON_GETXATTR);
 }
 
 SEC("lsm/inode_listxattr")
 int BPF_PROG(bpfj_fs_inode_listxattr, struct dentry* dentry, int lsm_ret) {
-  return lsm_ret ? lsm_ret : BPFJ_FS_CHECK(dentry, FMODE_READ);
+  return lsm_ret ? lsm_ret
+                 : BPFJ_FS_CHECK(dentry, FMODE_READ, BPFJ_FS_REASON_LISTXATTR);
 }
 
 SEC("lsm/inode_removexattr")
@@ -330,7 +370,9 @@ int BPF_PROG(
     struct dentry* dentry,
     const char* name,
     int lsm_ret) {
-  return lsm_ret ? lsm_ret : BPFJ_FS_CHECK(dentry, FMODE_WRITE);
+  return lsm_ret
+      ? lsm_ret
+      : BPFJ_FS_CHECK(dentry, FMODE_WRITE, BPFJ_FS_REASON_REMOVEXATTR);
 }
 
 SEC("lsm/inode_symlink")
@@ -340,10 +382,11 @@ int BPFJ_LSM_INODE_PROG(
     struct dentry* dentry,
     const char* old_name,
     int lsm_ret) {
-  return lsm_ret
-      ? lsm_ret
-      : BPFJ_FS_CHECK(
-            bpf_core_cast((dentry), typeof(*(dentry)))->d_parent, FMODE_WRITE);
+  return lsm_ret ? lsm_ret
+                 : BPFJ_FS_CHECK(
+                       bpf_core_cast((dentry), typeof(*(dentry)))->d_parent,
+                       FMODE_WRITE,
+                       BPFJ_FS_REASON_SYMLINK);
 }
 
 char LICENSE[] SEC("license") = "Dual MIT/GPL";

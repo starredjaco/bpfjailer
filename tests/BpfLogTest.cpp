@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <cstddef>
 #include <cstring>
 #include <string>
 #include <thread>
@@ -18,6 +19,7 @@
 #include "bpfj/enforce/KillEnforcer.h"
 #include "bpfj/enforce/Replace.h"
 #include "bpfj/enforce/bpf/types.h"
+#include "bpfj/enforce/bpf/types_fs.h"
 #include "bpfj/lib/bpf/logging.h"
 #include "log/BpfLog.h"
 #include "tests/Enforce.h"
@@ -38,6 +40,17 @@ using bpfjailer::test::testPins;
 void copyString(char* dst, std::size_t size, const char* src) {
   std::strncpy(dst, src, size);
   dst[size - 1] = '\0';
+}
+
+void setFsTrace(
+    struct bpfj_event& entry,
+    enum bpfj_fs_reason reason,
+    enum bpfj_fs_trace_token terminal) {
+  entry.type = BPFJ_EVENT_FS;
+  entry.fs_trace.tokens = (__u64)BPFJ_FS_TRACE_MATCH | ((__u64)terminal << 8);
+  entry.fs_trace.reason = static_cast<__u8>(reason);
+  entry.fs_trace.version = BPFJ_FS_TRACE_VERSION;
+  entry.fs_trace.len = 2;
 }
 
 [[nodiscard]] std::string drain(int fd) {
@@ -255,6 +268,77 @@ TEST(BpfLog, FormatsStructuredEvents) {
   ASSERT_EQ(bpfjailer::log::formatBpfEvent(entry), expected);
 }
 
+TEST(BpfLog, FormatsFilesystemTrace) {
+  struct TraceCase {
+    enum bpfj_fs_trace_token token;
+    const char* expected;
+  };
+  const TraceCase cases[] = {
+      {BPFJ_FS_TRACE_NO_MATCH, "open>match>no_match"},
+      {BPFJ_FS_TRACE_PERM_DENY, "open>match>perm_deny"},
+      {BPFJ_FS_TRACE_TOO_DEEP, "open>match>too_deep"},
+      {BPFJ_FS_TRACE_MATCH_ERROR, "open>match>match_error"},
+      {BPFJ_FS_TRACE_EXDEV_DENY, "open>match>exdev_deny"},
+  };
+
+  for (const auto& testCase : cases) {
+    struct bpfj_event entry{};
+    setFsTrace(entry, BPFJ_FS_REASON_OPEN, testCase.token);
+    const std::string formatted = bpfjailer::log::formatBpfEvent(entry);
+    ASSERT(formatted.find(testCase.expected) != std::string::npos);
+  }
+}
+
+TEST(BpfLog, DropsMalformedFilesystemTrace) {
+  struct bpfj_event entry{};
+  setFsTrace(entry, BPFJ_FS_REASON_OPEN, BPFJ_FS_TRACE_PERM_DENY);
+
+  entry.fs_trace.version = BPFJ_FS_TRACE_VERSION + 1;
+  ASSERT(
+      bpfjailer::log::formatBpfEvent(entry).find(" fs_trace=") ==
+      std::string::npos);
+
+  entry.fs_trace.version = BPFJ_FS_TRACE_VERSION;
+  entry.fs_trace.len = BPFJ_FS_TRACE_MAX_TOKENS + 1;
+  ASSERT(
+      bpfjailer::log::formatBpfEvent(entry).find(" fs_trace=") ==
+      std::string::npos);
+
+  entry.fs_trace.len = 2;
+  entry.fs_trace.reason = 0xff;
+  ASSERT(
+      bpfjailer::log::formatBpfEvent(entry).find(" fs_trace=") ==
+      std::string::npos);
+
+  entry.fs_trace.reason = BPFJ_FS_REASON_OPEN;
+  entry.fs_trace.tokens = 0xff;
+  ASSERT(
+      bpfjailer::log::formatBpfEvent(entry).find(" fs_trace=") ==
+      std::string::npos);
+}
+
+TEST(BpfLog, AcceptsLegacyFilesystemEventSize) {
+  struct bpfj_event entry{};
+  entry.type = BPFJ_EVENT_FS;
+  entry.pid = 100;
+  auto formatted = bpfjailer::log::formatBpfEvent(
+      &entry, offsetof(struct bpfj_event, fs_trace));
+
+  ASSERT(formatted);
+  ASSERT(formatted->find("event type=fs pid=100") != std::string::npos);
+  ASSERT(formatted->find(" fs_trace=") == std::string::npos);
+}
+
+TEST(BpfLog, IgnoresFilesystemTraceOnOtherEvents) {
+  struct bpfj_event entry{};
+  setFsTrace(entry, BPFJ_FS_REASON_OPEN, BPFJ_FS_TRACE_PERM_DENY);
+  entry.type = BPFJ_EVENT_PTRACE;
+
+  ASSERT(
+      bpfjailer::log::formatBpfEvent(entry).find(" fs_trace=") ==
+      std::string::npos);
+}
+
 TEST(BpfLog, NamesFilesystemEvents) {
   ASSERT_EQ(bpfjailer::log::eventTypeName(BPFJ_EVENT_FS), "fs");
   ASSERT_EQ(bpfjailer::log::eventTypeName(BPFJ_EVENT_UNIX), "unix");
@@ -367,6 +451,7 @@ TEST(BpfLog, BpfjlogPrintsDeniedFilesystemAccess) {
   ASSERT_EQ(actor.run(), EACCES);
   waitForOutput(proc, "event type=fs", true);
   waitForOutput(proc, "role=svc", true);
+  waitForOutput(proc, "fs_trace=open>match>perm_deny", true);
   ASSERT_EQ(proc.stop(), 0);
 
   ASSERT_EQ(::unlink(path.c_str()), 0);

@@ -4,9 +4,11 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <string_view>
 
 #include "bpfj/enforce/bpf/types.h"
+#include "bpfj/enforce/bpf/types_fs.h"
 #include "bpfj/lib/bpf/logging.h"
 
 namespace bpfjailer::log {
@@ -18,6 +20,91 @@ namespace {
     std::size_t size) noexcept {
   const char* end = std::find(buf, buf + size, '\0');
   return std::string_view(buf, static_cast<std::size_t>(end - buf));
+}
+
+[[nodiscard]] const char* fsReasonTracePrefix(__u8 reason) noexcept {
+  switch (reason) {
+    case BPFJ_FS_REASON_OPEN:
+      return "open";
+    case BPFJ_FS_REASON_UNLINK:
+      return "unlink";
+    case BPFJ_FS_REASON_LINK_OLD:
+      return "link_old";
+    case BPFJ_FS_REASON_LINK_NEW:
+      return "link_new";
+    case BPFJ_FS_REASON_MKNOD:
+      return "mknod";
+    case BPFJ_FS_REASON_RENAME_OLD:
+      return "rename_old";
+    case BPFJ_FS_REASON_RENAME_NEW:
+      return "rename_new";
+    case BPFJ_FS_REASON_RMDIR:
+      return "rmdir";
+    case BPFJ_FS_REASON_SYMLINK:
+      return "symlink";
+    case BPFJ_FS_REASON_MKDIR:
+      return "mkdir";
+    case BPFJ_FS_REASON_SETATTR:
+      return "setattr";
+    case BPFJ_FS_REASON_GETATTR:
+      return "getattr";
+    case BPFJ_FS_REASON_SETXATTR:
+      return "setxattr";
+    case BPFJ_FS_REASON_GETXATTR:
+      return "getxattr";
+    case BPFJ_FS_REASON_LISTXATTR:
+      return "listxattr";
+    case BPFJ_FS_REASON_REMOVEXATTR:
+      return "removexattr";
+    case BPFJ_FS_REASON_CREATE:
+      return "create";
+    default:
+      return nullptr;
+  }
+}
+
+[[nodiscard]] const char* fsTraceTokenToString(__u8 token) noexcept {
+  switch (token) {
+    case BPFJ_FS_TRACE_MATCH:
+      return "match";
+    case BPFJ_FS_TRACE_NO_MATCH:
+      return "no_match";
+    case BPFJ_FS_TRACE_PERM_DENY:
+      return "perm_deny";
+    case BPFJ_FS_TRACE_TOO_DEEP:
+      return "too_deep";
+    case BPFJ_FS_TRACE_MATCH_ERROR:
+      return "match_error";
+    case BPFJ_FS_TRACE_EXDEV_DENY:
+      return "exdev_deny";
+    default:
+      return nullptr;
+  }
+}
+
+[[nodiscard]] std::string decodeFsTrace(const struct bpfj_event& entry) {
+  const auto& trace = entry.fs_trace;
+  if (entry.type != BPFJ_EVENT_FS || trace.version != BPFJ_FS_TRACE_VERSION ||
+      trace.len == 0 || trace.len > BPFJ_FS_TRACE_MAX_TOKENS) {
+    return {};
+  }
+
+  const char* prefix = fsReasonTracePrefix(trace.reason);
+  if (!prefix) {
+    return {};
+  }
+
+  std::string decoded(prefix);
+  for (__u8 i = 0; i < trace.len; ++i) {
+    const __u8 token = (trace.tokens >> (i * 8)) & 0xff;
+    const char* text = fsTraceTokenToString(token);
+    if (!text) {
+      return {};
+    }
+    decoded.push_back('>');
+    decoded.append(text);
+  }
+  return decoded;
 }
 
 } // namespace
@@ -133,6 +220,11 @@ std::string formatBpfEvent(const struct bpfj_event& entry) {
   line += std::to_string(entry.pod.gc_removal_attempts);
   line += " enrollment_source=";
   line += std::to_string(entry.pod.enrollment_source);
+  const std::string fsTrace = decodeFsTrace(entry);
+  if (!fsTrace.empty()) {
+    line += " fs_trace=";
+    line += fsTrace;
+  }
   return line;
 }
 
@@ -160,16 +252,19 @@ Expected<std::string> formatBpfEvent(const void* data, std::size_t size) {
         makeError(std::errc::invalid_argument, "bpf event record was null"));
   }
 
-  if (size < sizeof(struct bpfj_event)) {
+  constexpr std::size_t kBaseEventSize = offsetof(struct bpfj_event, fs_trace);
+  if (size < kBaseEventSize) {
     return makeUnexpected(makeError(
         std::errc::argument_out_of_domain,
         "bpf event record was ",
         std::to_string(size),
         " bytes, expected at least ",
-        std::to_string(sizeof(struct bpfj_event))));
+        std::to_string(kBaseEventSize)));
   }
 
-  return formatBpfEvent(*static_cast<const struct bpfj_event*>(data));
+  struct bpfj_event entry{};
+  std::memcpy(&entry, data, std::min(size, sizeof(entry)));
+  return formatBpfEvent(entry);
 }
 
 } // namespace bpfjailer::log
