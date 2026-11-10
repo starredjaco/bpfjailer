@@ -10,8 +10,7 @@
 #include "bpfj/var/bpf/types_var.h"
 
 // OSS task storage holds arena pointers rather than embedded pods.
-#undef BPFJ_MAX_POD_PER_PID
-#define BPFJ_MAX_POD_PER_PID BPFJ_OSS_MAX_POD_PER_PID
+#define BPFJ_MAX_POD_PER_PID 8
 
 // The types the open source jailer needs, and nothing else; the internal tree
 // keeps its own, much larger one at bpfjailer/enforce/bpf/types.h, and what is

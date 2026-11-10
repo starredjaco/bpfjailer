@@ -1,7 +1,6 @@
 #pragma once
 
 #include "bpfj/lib/bpf/types_uuid.h"
-#include "bpfj/match/bpf/types_file.h"
 
 #define BPFJ_FILE_MATCH_NAME_LEN 256
 #define BPFJ_FILE_MATCH_CACHED_PATTERN_STR_LEN 1024

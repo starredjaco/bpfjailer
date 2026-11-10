@@ -7,22 +7,6 @@
 #define BPFJ_MOUNT_MAX_LOAD_RETRIES 4
 #define BPFJ_MOUNT_MAX_TREE_BREADTH 128
 #define BPFJ_MOUNT_MAX_MOUNTS 1048576
-#define BPFJ_MOUNT_OLD_MAX_TREE_BREADTH 32
-#define BPFJ_MOUNT_OLD_MAX_MOUNTS 512
-
-struct bpfj_mount_key {
-  struct dentry* dentry;
-};
-
-struct bpfj_mount_lock {
-  __u64 ns_ino;
-  __u32 seqlock;
-};
-
-struct bpfj_mount_val {
-  struct mount* mount;
-};
-
 // The canonical transition for one root dentry. During construction duplicate
 // roots retain the transition with the lowest mount ID, excluding later bind
 // aliases from path walks.
