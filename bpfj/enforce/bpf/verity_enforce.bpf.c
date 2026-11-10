@@ -29,7 +29,6 @@
 #include "bpfj/enforce/bpf/maps.h"
 #include "bpfj/enforce/bpf/role_gate.h"
 #include "bpfj/enforce/bpf/types.h"
-#define BPFJ_FSVERITY_POLICY_ARENA 1
 #include "bpfj/fsverity/bpf/fsverity.h"
 #include "bpfj/lib/bpf/logging_bpf.h"
 

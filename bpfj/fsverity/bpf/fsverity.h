@@ -2,18 +2,11 @@
 
 #pragma once
 
-// For the errnos the checks below fail with, since
-// bpfjailer/enforce/bpf/key_enforce.bpf.c pulls this header in without one.
 #include <errno.h>
 
 #include "bpfj/fsverity/bpf/types_fsverity.h"
 #include "bpfj/lib/bpf/kfuncs.h"
 #include "bpfj/lib/bpf/scratch.h"
-#include "bpfj/lib/bpf/types_role.h"
-
-// Included by both trees, which is why it includes neither tree's types.h and
-// why bpfj_check_fsverity_pkcs7 takes a role id as bytes: the two spell the
-// wrapping struct differently (bpfj_role_id here, role_id internally).
 
 #define BPFJ_SIG_BUF_SIZE 4096 * 4
 
@@ -33,32 +26,6 @@ struct bpfj_sig_buf {
 struct bpfj_fsverity_buf {
   char buf[BPFJ_FSVERITY_STRUCT_SIZE];
 };
-
-// The key bpfj_key_map is declared with, laid out the same as a pod's role_id
-// member in either tree.
-struct bpfj_verity_key {
-  char id[ROLE_ID_LEN];
-};
-
-#ifndef BPFJ_FSVERITY_POLICY_ARENA
-struct {
-  __uint(type, BPF_MAP_TYPE_HASH);
-  __uint(max_entries, 1);
-  __type(key, struct bpfj_verity_key);
-  __type(value, __u32);
-} bpfj_key_map SEC(".maps");
-
-// The lowest sequence number a binary claiming this role may carry, from
-// `min-seq` in policy; a role absent from here is not sequence-checked, so
-// presence is the opt-in. Nothing in BPF raises it, which makes retiring a
-// version a policy change rather than a side effect of a newer binary running.
-struct {
-  __uint(type, BPF_MAP_TYPE_HASH);
-  __uint(max_entries, 1);
-  __type(key, struct bpfj_verity_key);
-  __type(value, __u64);
-} bpfj_verity_seq_map SEC(".maps");
-#endif
 
 // Both buffers a check needs, in one slot, since they are held over the same
 // span and claiming them together removes a failure path.
@@ -216,45 +183,6 @@ static int bpfj_verify_fsverity_pkcs7(
 
   return 0;
 }
-
-#ifndef BPFJ_FSVERITY_POLICY_ARENA
-static int bpfj_check_fsverity_pkcs7(
-    struct file* file,
-    const char role_id[ROLE_ID_LEN],
-    bool is_exec,
-    enum bpfj_fsverity_reason* reason) {
-  // Check keys
-  __u32* key_serial = bpf_map_lookup_elem(&bpfj_key_map, role_id);
-  if (!key_serial) {
-    // No key for this role
-    return 0;
-  }
-
-  // We need a key
-  struct bpf_key* key = bpf_lookup_user_key(*key_serial, 0);
-  if (!key) {
-    // The serial no longer resolves, which is the check being unavailable
-    // rather than passing; returning 0 would silently disarm the role.
-    *reason = BPFJ_FSVERITY_REASON_NO_KEY;
-    return -ENOKEY;
-  }
-
-  BPFJ_SCRATCH_GUARD(struct bpfj_fsverity_scratch, scratch);
-  if (!scratch) {
-    // The pool is finite, and the alternative to denying is running a binary
-    // whose signature was never looked at.
-    *reason = BPFJ_FSVERITY_REASON_NONE_NOMEM;
-    bpf_key_put(key);
-    return -ENOMEM;
-  }
-
-  __u64* floor = bpf_map_lookup_elem(&bpfj_verity_seq_map, role_id);
-  const int ret = bpfj_verify_fsverity_pkcs7(
-      file, key, scratch, floor != NULL, floor ? *floor : 0, is_exec, reason);
-  bpf_key_put(key);
-  return ret;
-}
-#endif
 
 static int bpfj_check_fsverity_pkcs7_policy(
     struct file* file,
