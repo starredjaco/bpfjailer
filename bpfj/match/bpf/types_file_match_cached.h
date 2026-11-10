@@ -78,13 +78,5 @@ struct bpfj_file_matcher {
   struct bpfj_file_match_cached_pattern_str __arena*
       pattern_strs; // arena ptr to pattern_str[]
   __u32 num_pattern_strs;
-  // Non-zero when at least one of this role's paths asks for a signature.
-  //
-  // bpfj_fs2_file_post_open_sig works out what to verify from the cache entry
-  // the path match left behind, and a cache miss leaves it with no answer. For
-  // a role that signs nothing that is fine -- there was nothing to check. For a
-  // role that does, it is the difference between checking a signature and
-  // silently not, so the miss has to deny, and this is how that half knows
-  // which case it is in without a match of its own.
-  __u32 has_signed_paths;
+  __u32 reserved;
 };

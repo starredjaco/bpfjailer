@@ -75,14 +75,9 @@ static __always_inline volatile __u64* bpfj_file_match_cached_stats_for_cpu(
 //
 // Its own guard rather than BPFJ_HEAP_ALLOC_GUARD's, because the state owns
 // vectors: the plain guard frees the struct, which would strand their buffers.
-// Callers may wrap teardown by defining BPFJ_FILE_MATCH_CACHED_CLEANUP.
-#ifndef BPFJ_FILE_MATCH_CACHED_CLEANUP
-#define BPFJ_FILE_MATCH_CACHED_CLEANUP bpfj_file_match_cached_state_free
-#endif
-
-#define BPFJ_FILE_MATCH_CACHED_ALLOC(_name)                       \
-  __attribute__((cleanup(BPFJ_FILE_MATCH_CACHED_CLEANUP))) struct \
-      bpfj_file_match_cached_state __arena* _name =               \
+#define BPFJ_FILE_MATCH_CACHED_ALLOC(_name)                          \
+  __attribute__((cleanup(bpfj_file_match_cached_state_free))) struct \
+      bpfj_file_match_cached_state __arena* _name =                  \
           bpfj_file_match_cached_state_alloc()
 
 #define _BPFJ_FILE_MATCH_CACHED(                                  \
@@ -121,26 +116,6 @@ static __always_inline volatile __u64* bpfj_file_match_cached_stats_for_cpu(
 // carries none for it.
 #define BPFJ_FILE_MATCH_CACHED_LOOKUP(_name, _match_idx) \
   ({ bpfj_file_match_cached_lookup(_name, _match_idx); })
-
-// Bounded by the arena scratch, not by sizeof(_buf): the walked path is
-// assembled into a pattern_str, so a larger destination would read past it.
-#define BPFJ_FILE_MATCH_CACHED_PRINT(_name, _buf)                           \
-  ({                                                                        \
-    BPFJ_HEAP_ALLOC_GUARD(struct bpfj_file_match_cached_pattern_str, _str); \
-    long _ret = -ENOMEM;                                                    \
-    if (_str) {                                                             \
-      _ret = bpfj_file_match_cached_get_walked_path(_name, _str);           \
-      if (_ret == 0) {                                                      \
-        bpfj_heap_read_arena(                                               \
-            _buf,                                                           \
-            sizeof(_buf) < BPFJ_FILE_MATCH_CACHED_PATTERN_STR_LEN           \
-                ? sizeof(_buf)                                              \
-                : BPFJ_FILE_MATCH_CACHED_PATTERN_STR_LEN,                   \
-            _str->pattern);                                                 \
-      }                                                                     \
-    }                                                                       \
-    _ret;                                                                   \
-  })
 
 // IMPLEMENTATION
 
@@ -245,8 +220,6 @@ struct bpfj_file_match_cached_state {
   // retry use bpf_loop without a second numeric iterator in the walk frame.
   long retry_result;
   long component_result;
-  // Opaque per-invocation scratch reserved for the allocating caller.
-  __u64 caller_data;
   __u32 walk_depth;
   __u32 checkpoint_depth;
   bool completed_cycle;
@@ -359,19 +332,8 @@ struct bpfj_file_match_cached_native_scratch {
   struct bpfj_file_match_cached_validation validation;
 };
 
-// Allocate a run state with its vectors initialized. __noinline so the
-// allocation and initialization sit in a frame of their own: every hook opens
-// with this, and a hook's frame is the first one on the chain through
-// file_match_cached that is at the verifier's combined-stack limit.
-static __noinline void __arena* bpfj_file_match_cached_state_alloc(void) {
-  bpfj_heap_use_arena();
-
-  struct bpfj_file_match_cached_state __arena* state =
-      BPFJ_HEAP_ALLOC(sizeof(*state));
-  if (state == NULL) {
-    return NULL;
-  }
-
+static __always_inline void bpfj_file_match_cached_state_init(
+    struct bpfj_file_match_cached_state __arena* state) {
   bpfj_vec_init(&state->iters, sizeof(struct bpfj_file_match_cached_iter));
   bpfj_vec_init(&state->saved_dentries, sizeof(uintptr_t));
   bpfj_glob_run_init(&state->glob_run);
@@ -395,11 +357,26 @@ static __noinline void __arena* bpfj_file_match_cached_state_alloc(void) {
   state->ancestry_bloom[1] = 0;
   state->retry_result = 0;
   state->component_result = 0;
-  state->caller_data = 0;
   state->walk_depth = 0;
   state->checkpoint_depth = 0;
   state->completed_cycle = false;
   state->has_pending_checkpoint = false;
+}
+
+// Allocate a run state with its vectors initialized. __noinline so the
+// allocation and initialization sit in a frame of their own: every hook opens
+// with this, and a hook's frame is the first one on the chain through
+// file_match_cached that is at the verifier's combined-stack limit.
+static __noinline void __arena* bpfj_file_match_cached_state_alloc(void) {
+  bpfj_heap_use_arena();
+
+  struct bpfj_file_match_cached_state __arena* state =
+      BPFJ_HEAP_ALLOC(sizeof(*state));
+  if (state == NULL) {
+    return NULL;
+  }
+
+  bpfj_file_match_cached_state_init(state);
   return state;
 }
 
@@ -1424,86 +1401,6 @@ static __noinline long bpfj_file_match_cached_dbg_print(
 
     BPFJ_LOG("file_match_cached: matched pattern: %s", pattern_str->pattern);
   }
-
-  return 0;
-}
-
-// Event formatting can sit on top of the matcher's already-deep call chain.
-// Keep this inline so callers do not exceed the verifier's eight-frame limit.
-static __always_inline long bpfj_file_match_cached_get_walked_path(
-    struct bpfj_file_match_cached_state __arena* state __arg_arena,
-    struct bpfj_file_match_cached_pattern_str __arena* str __arg_arena) {
-  char __arena* path = str->pattern;
-
-  // Every bound below is the size of `path`, which is a pattern_str and NOT
-  // BPFJ_FILE_MATCH_CACHED_BUF_SIZE: the two differ, and bounding a write to
-  // the larger one runs off the end of the block and corrupts the arena heap.
-  // Masks require a power of two.
-  _Static_assert(
-      (BPFJ_FILE_MATCH_CACHED_PATTERN_STR_LEN &
-       (BPFJ_FILE_MATCH_CACHED_PATTERN_STR_LEN - 1)) == 0,
-      "pattern_str length must be a power of two to mask against");
-  _Static_assert(
-      BPFJ_FILE_MATCH_CACHED_PATTERN_STR_LEN > BPFJ_FILE_MATCH_NAME_LEN,
-      "a single component has to fit in the walked-path buffer");
-
-  u32 off = 0;
-  u32 i;
-  __u32 depth = bpfj_vec_size(&state->saved_dentries);
-  BPFJ_DBG_LOG("file_match_cached: Saved dentries depth: %u", depth);
-  bpf_for(i, 0, BPFJ_FILE_MATCH_CACHED_MAX_SAVED_DENTRIES) {
-    if (i >= depth) {
-      break;
-    }
-
-    // Walked leaf first, so the path is assembled from the far end back.
-    uintptr_t __arena* saved =
-        bpfj_vec_at(&state->saved_dentries, depth - i - 1);
-    if (saved == NULL) {
-      break;
-    }
-
-    uintptr_t dentry = *saved;
-    const unsigned char* name_ptr =
-        BPF_CORE_READ((struct dentry*)dentry, d_name.name);
-    if (!name_ptr) {
-      continue;
-    }
-
-    BPFJ_DBG_LOG(
-        "file_match_cached: Saved dentry %u name: %s", depth - i - 1, name_ptr);
-
-    u64 hash_len_val = BPF_CORE_READ((struct dentry*)dentry, d_name.hash_len);
-    u32 len = bpfj_file_hashlen_len(hash_len_val);
-    len &= (BPFJ_FILE_MATCH_NAME_LEN - 1);
-
-    char c = '\0';
-    bpf_probe_read_kernel(&c, sizeof(c), name_ptr);
-    if (c == '\0' || c == '/') {
-      // Skip empty and root names
-      continue;
-    }
-
-    off &= (BPFJ_FILE_MATCH_CACHED_PATTERN_STR_LEN - 1);
-    if (off >=
-        BPFJ_FILE_MATCH_CACHED_PATTERN_STR_LEN - BPFJ_FILE_MATCH_NAME_LEN) {
-      break;
-    }
-    path[off++] = '/';
-
-    long ret =
-        bpfj_heap_read_kernel(path + off, len, (__u64)(uintptr_t)name_ptr);
-    if (ret < 0) {
-      return ret;
-    }
-
-    off += len;
-  }
-
-  off &= (BPFJ_FILE_MATCH_CACHED_PATTERN_STR_LEN - 1);
-  path[off] = '\0';
-
-  BPFJ_DBG_LOG("file_match_cached: Walked path: %s", path);
 
   return 0;
 }
