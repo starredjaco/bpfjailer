@@ -1915,7 +1915,7 @@ static __always_inline void* bpfj_file_match_cached_lookup(
   // entirely inside it.
   u64 total = (u64)count * (u64)size;
   u64 off = (u64)(u32)path_id * (u64)size;
-  if (total > BPFJ_HEAP_MAX_ARENA_SIZE || off + (u64)size > total) {
+  if (total > BPFJ_HEAP_ARENA_SIZE || off + (u64)size > total) {
     return NULL;
   }
   return (void*)((char __arena*)vec + off);

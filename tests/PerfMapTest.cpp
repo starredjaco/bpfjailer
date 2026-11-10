@@ -189,7 +189,8 @@ TEST(PerfMap, TestFailedInitUnwindsItself) {
   // than the whole arena for the slot table alone. A vector of pairs rather
   // than a hash map keeps the setup cheap; init() only sizes and iterates it.
   const std::size_t numKeys =
-      (BPFJ_HEAP_MAX_ARENA_SIZE / (2 * sizeof(struct bpfj_perf_map_slot))) + 1;
+      (BPFJ_HEAP_MAX_BACKING_SIZE / (2 * sizeof(struct bpfj_perf_map_slot))) +
+      1;
   std::vector<std::pair<__u64, __u64>> entries;
   entries.reserve(numKeys);
   for (std::size_t i = 0; i < numKeys; ++i) {

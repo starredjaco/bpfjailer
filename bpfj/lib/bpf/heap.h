@@ -119,7 +119,7 @@ __noinline long bpfj_heap_grow(u32 min_bytes) {
   // Unlocked: only a hint for the recheck below, which holds the lock.
   u32 old_gen = ctrl->grow_gen;
   u32 old_arena_size = ctrl->arena_size;
-  if (old_arena_size >= BPFJ_HEAP_MAX_ARENA_SIZE) {
+  if (old_arena_size >= BPFJ_HEAP_MAX_BACKING_SIZE) {
     return -ENOMEM;
   }
 
@@ -185,7 +185,7 @@ __noinline long bpfj_heap_grow_preallocated(
   if (ctrl->arena_size != expected_arena_size) {
     return 0;
   }
-  if (expected_arena_size >= BPFJ_HEAP_MAX_ARENA_SIZE) {
+  if (expected_arena_size >= BPFJ_HEAP_MAX_BACKING_SIZE) {
     return -ENOMEM;
   }
 

@@ -745,7 +745,7 @@ int test_heap_calloc(void* ctx) {
     int i;
     for (i = 0; i < 32; i++) { // 256 / 8 = 32 iterations
       __u32 off = calloc_off + (__u32)i * 8;
-      off = off & (BPFJ_HEAP_MAX_ARENA_SIZE - 1);
+      off = off & (BPFJ_HEAP_ARENA_SIZE - 1);
       __u64 __arena* p = (__u64 __arena*)((char __arena*)base + off);
       if (*p != 0)
         calloc_all_zero = 0;
@@ -782,7 +782,7 @@ int test_heap_realloc(void* ctx) {
   int i;
   for (i = 0; i < 8; i++) { // 64 / 8 = 8 iterations
     __u32 off = realloc_null_alloc_off + (__u32)i * 8;
-    off = off & (BPFJ_HEAP_MAX_ARENA_SIZE - 1);
+    off = off & (BPFJ_HEAP_ARENA_SIZE - 1);
     __u64 __arena* p = (__u64 __arena*)((char __arena*)base + off);
     *p = 0xAAAAAAAAAAAAAAAAULL;
   }
@@ -794,7 +794,7 @@ int test_heap_realloc(void* ctx) {
     realloc_data_preserved = 1;
     for (i = 0; i < 8; i++) {
       __u32 off = realloc_grown_off + (__u32)i * 8;
-      off = off & (BPFJ_HEAP_MAX_ARENA_SIZE - 1);
+      off = off & (BPFJ_HEAP_ARENA_SIZE - 1);
       __u64 __arena* p = (__u64 __arena*)((char __arena*)base + off);
       if (*p != 0xAAAAAAAAAAAAAAAAULL)
         realloc_data_preserved = 0;
@@ -950,7 +950,7 @@ int test_heap_userspace_alloc(void* ctx) {
       usalloc_values_ok = 0;
       continue;
     }
-    off = off & (BPFJ_HEAP_MAX_ARENA_SIZE - 1);
+    off = off & (BPFJ_HEAP_ARENA_SIZE - 1);
     __u64 __arena* p = (__u64 __arena*)((char __arena*)base + off);
     if (*p != USALLOC_MAGIC_BASE + (__u64)i)
       usalloc_values_ok = 0;

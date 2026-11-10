@@ -28,27 +28,23 @@
 #define BPFJ_HEAP_PAGE_SIZE 4096
 #define BPFJ_HEAP_INIT_PAGES 64 // 256 KiB initial
 #define BPFJ_HEAP_GROW_PAGES 64 // 256 KiB per growth
-#define BPFJ_HEAP_MAX_ARENA_PAGES 8192 // 32 MiB max
-#define BPFJ_HEAP_MAX_ARENA_SIZE \
-  ((__u32)BPFJ_HEAP_MAX_ARENA_PAGES * BPFJ_HEAP_PAGE_SIZE)
+#define BPFJ_HEAP_MAX_BACKING_PAGES 8192 // 32 MiB max
+#define BPFJ_HEAP_MAX_BACKING_SIZE \
+  ((__u32)BPFJ_HEAP_MAX_BACKING_PAGES * BPFJ_HEAP_PAGE_SIZE)
+#define BPFJ_HEAP_MAX_ALLOC_SIZE BPFJ_HEAP_MAX_BACKING_SIZE
 
 #ifdef __cplusplus
-static_assert(BPFJ_HEAP_MAX_ARENA_SIZE % BPFJ_HEAP_PAGE_SIZE == 0);
+static_assert(BPFJ_HEAP_MAX_BACKING_SIZE % BPFJ_HEAP_PAGE_SIZE == 0);
 #else
-_Static_assert(BPFJ_HEAP_MAX_ARENA_SIZE % BPFJ_HEAP_PAGE_SIZE == 0, "");
+_Static_assert(BPFJ_HEAP_MAX_BACKING_SIZE % BPFJ_HEAP_PAGE_SIZE == 0, "");
 #endif
 
-// Pages the arena map carries above the heap's ceiling, reserved for the
-// __arena globals libbpf places in the map's last pages -- today just
-// libarena's 64 KiB qnodes array -- so a fully grown heap cannot allocate over
-// them; heap::init() checks the reservation is still big enough.
-// BPFJ_HEAP_MAX_ARENA_SIZE stays a power of two so bpfj_heap_clamp_off can
-// mask offsets with it.
 #define BPFJ_HEAP_ARENA_GLOBALS_PAGES 32
 #define BPFJ_HEAP_ARENA_GLOBALS_SIZE \
   ((__u32)BPFJ_HEAP_ARENA_GLOBALS_PAGES * BPFJ_HEAP_PAGE_SIZE)
-#define BPFJ_HEAP_ARENA_MAP_PAGES \
-  (BPFJ_HEAP_MAX_ARENA_PAGES + BPFJ_HEAP_ARENA_GLOBALS_PAGES)
+#define BPFJ_HEAP_ARENA_MAP_PAGES (1U << 20)
+#define BPFJ_HEAP_ARENA_SIZE \
+  (1ULL * BPFJ_HEAP_ARENA_MAP_PAGES * BPFJ_HEAP_PAGE_SIZE)
 
 // Block flags stored in low 2 bits of size_and_flags
 #define BPFJ_HEAP_FLAG_PREV_FREE 0x1
@@ -146,13 +142,13 @@ struct bpfj_heap_syscall_req {
 
 // Shared helpers: address arithmetic
 
-static __always_inline __u32 bpfj_heap_clamp_off(__u32 off) {
+static __always_inline __u32 bpfj_heap_clamp_off(__u32 offset) {
 #ifdef __cplusplus
-  off &= (BPFJ_HEAP_MAX_ARENA_SIZE - 1);
+  offset &= (BPFJ_HEAP_MAX_BACKING_SIZE - 1);
 #else
-  asm volatile("%0 &= %1" : "+r"(off) : "r"(BPFJ_HEAP_MAX_ARENA_SIZE - 1));
+  asm volatile("%0 &= %1" : "+r"(offset) : "r"(BPFJ_HEAP_MAX_BACKING_SIZE - 1));
 #endif
-  return off;
+  return offset;
 }
 
 static __always_inline struct bpfj_heap_block_hdr __arena* bpfj_heap_block_at(
@@ -207,7 +203,7 @@ static __always_inline __u32 bpfj_heap_fls(__u32 x) {
 
 static __always_inline __u32
 bpfj_heap_growth_size(__u32 min_bytes, __u32 arena_size) {
-  if (min_bytes == 0 || arena_size >= BPFJ_HEAP_MAX_ARENA_SIZE) {
+  if (min_bytes == 0 || arena_size >= BPFJ_HEAP_MAX_BACKING_SIZE) {
     return 0;
   }
 
@@ -219,7 +215,7 @@ bpfj_heap_growth_size(__u32 min_bytes, __u32 arena_size) {
   }
 
   __u64 bytes = pages * BPFJ_HEAP_PAGE_SIZE;
-  __u32 remaining = BPFJ_HEAP_MAX_ARENA_SIZE - arena_size;
+  __u32 remaining = BPFJ_HEAP_MAX_BACKING_SIZE - arena_size;
   return bytes > remaining ? remaining : (__u32)bytes;
 }
 
@@ -544,7 +540,7 @@ static __always_inline long bpfj_heap_alloc_impl(
     void __arena* base,
     struct bpfj_heap_control __arena* ctrl,
     __u32 size) {
-  if (size == 0 || size > BPFJ_HEAP_MAX_ARENA_SIZE) {
+  if (size == 0 || size > BPFJ_HEAP_MAX_BACKING_SIZE) {
     return -EINVAL;
   }
 

@@ -143,7 +143,7 @@ static __noinline long bpfj_mount_snapshot_build(
   __u32 map_bytes = bpfj_const_map_allocation_size(
       mounts, sizeof(__u64), sizeof(struct bpfj_mount_snapshot_value));
   if (map_bytes == 0 ||
-      map_bytes > BPFJ_HEAP_MAX_ARENA_SIZE -
+      map_bytes > BPFJ_HEAP_MAX_BACKING_SIZE -
               (__u32) __builtin_offsetof(struct bpfj_mount_snapshot, roots)) {
     return -E2BIG;
   }

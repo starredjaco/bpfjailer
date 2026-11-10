@@ -4,6 +4,7 @@
 #include "tests/Harness.h"
 
 #include <chrono>
+#include <limits>
 #include <thread>
 #include <vector>
 
@@ -51,6 +52,28 @@ void initControl(bpfj_heap_control& ctrl, __u32 arenaSize) {
 }
 
 } // namespace
+
+TEST(Heap, AddressCapacityIsIndependentOfBackingBudget) {
+  static_assert(BPFJ_HEAP_ARENA_SIZE == (1ULL << 32));
+  static_assert(BPFJ_HEAP_MAX_BACKING_SIZE == (32U << 20));
+  constexpr std::uintptr_t baseAddress = 0x400000000000ULL;
+  void* base = reinterpret_cast<void*>(baseAddress);
+  const __u32 offsets[] = {
+      BPFJ_HEAP_MAX_BACKING_SIZE + 4096U, 0x40001000U, 0xffffffffU};
+  for (const auto offset : offsets) {
+    void* pointer = heap::offsetToPtr(base, offset);
+    ASSERT_EQ(reinterpret_cast<std::uintptr_t>(pointer), baseAddress + offset);
+    ASSERT_EQ(heap::ptrToOffset(base, pointer), offset);
+  }
+  ASSERT(heap::offsetToPtr(base, 0) == nullptr);
+  const std::uint64_t invalidOffsets[] = {
+      BPFJ_HEAP_ARENA_SIZE,
+      BPFJ_HEAP_ARENA_SIZE + 4096,
+      std::numeric_limits<std::uint64_t>::max()};
+  for (const auto offset : invalidOffsets) {
+    ASSERT(heap::offsetToPtr(base, offset) == nullptr);
+  }
+}
 
 TEST(Heap, AllocFreeReturnsToBaseline) {
   const auto cfg = bpfjailer::test::testPins();

@@ -128,7 +128,7 @@ static __noinline long bpfj_vec_reserve(
   // Both the doubling and the round-up can wrap, and the byte count can
   // overflow a __u32, so the ceiling is checked by dividing.
   if (new_capacity < want ||
-      new_capacity > BPFJ_HEAP_MAX_ARENA_SIZE / elem_size) {
+      new_capacity > BPFJ_HEAP_MAX_ALLOC_SIZE / elem_size) {
     return -E2BIG;
   }
 

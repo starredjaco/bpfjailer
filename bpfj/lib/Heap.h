@@ -52,7 +52,7 @@ err::Expected<> init(Skel& obj) {
   // staging mapping for a reused pinned arena with the map fd. Older kernels
   // report zero and libbpf's initial-value pointer is already the live map.
   constexpr std::size_t kArenaMapSize =
-      BPFJ_HEAP_ARENA_MAP_PAGES * BPFJ_HEAP_PAGE_SIZE;
+      1ULL * BPFJ_HEAP_ARENA_MAP_PAGES * BPFJ_HEAP_PAGE_SIZE;
   const int mapFd = bpf_map__fd(obj->maps().bpfj_heap_arena);
   struct bpf_map_info info{};
   __u32 infoLen = sizeof(info);
@@ -112,12 +112,12 @@ inline void* base(Skel&& skel) {
 }
 
 // Translate a heap offset to an arena pointer, or nullptr if out of range.
-inline void* offsetToPtr(void* base, __u32 offset) {
-  if (offset >= BPFJ_HEAP_MAX_ARENA_PAGES * BPFJ_HEAP_PAGE_SIZE) {
+inline void* offsetToPtr(void* base, std::uint64_t offset) {
+  if (offset == 0 || offset >= BPFJ_HEAP_ARENA_SIZE) {
     return nullptr;
   }
 
-  return reinterpret_cast<char*>(base) + offset;
+  return static_cast<char*>(base) + offset;
 }
 
 // Inverse of offsetToPtr; a nullptr maps to BPFJ_HEAP_NULL.
@@ -278,7 +278,7 @@ inline __u32 currentUsed(Skel&& skel) {
   if (ctrl == nullptr) {
     return 0;
   }
-  // The arena is capped at BPFJ_HEAP_MAX_ARENA_PAGES (32 MiB), so the __u64
+  // The arena is capped at BPFJ_HEAP_MAX_BACKING_PAGES (32 MiB), so the __u64
   // count cannot reach 32 bits and the narrowing is safe.
   return static_cast<__u32>(ctrl->current_used);
 }

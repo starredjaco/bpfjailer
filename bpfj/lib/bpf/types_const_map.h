@@ -90,17 +90,17 @@ static __always_inline __u32 bpfj_const_map_allocation_size(
 
   __u64 bytes = sizeof(struct bpfj_const_map);
   bytes += (__u64)capacity * sizeof(__u32);
-  if (bytes > BPFJ_HEAP_MAX_ARENA_SIZE) {
+  if (bytes > BPFJ_HEAP_MAX_ALLOC_SIZE) {
     return 0;
   }
   bytes = bpfj_const_map_align((__u32)bytes);
   bytes += (__u64)max_entries * key_stride;
-  if (bytes > BPFJ_HEAP_MAX_ARENA_SIZE) {
+  if (bytes > BPFJ_HEAP_MAX_ALLOC_SIZE) {
     return 0;
   }
   bytes = bpfj_const_map_align((__u32)bytes);
   bytes += (__u64)max_entries * val_stride;
-  if (bytes > BPFJ_HEAP_MAX_ARENA_SIZE) {
+  if (bytes > BPFJ_HEAP_MAX_ALLOC_SIZE) {
     return 0;
   }
   return (__u32)bytes;

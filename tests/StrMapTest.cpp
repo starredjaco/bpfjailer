@@ -104,7 +104,7 @@ TEST(StrMap, TestFailedInitUnwindsItself) {
   // Entries are 24 bytes apiece, so this vector cannot fit the arena at any
   // size and the allocation fails once the header is already in the slot.
   const std::size_t capacity =
-      (BPFJ_HEAP_MAX_ARENA_SIZE / sizeof(struct bpfj_str_map_entry)) + 1;
+      (BPFJ_HEAP_MAX_BACKING_SIZE / sizeof(struct bpfj_str_map_entry)) + 1;
   {
     StrMap strMap{skel, skel->bss().map};
     const auto res = strMap.init(capacity);
