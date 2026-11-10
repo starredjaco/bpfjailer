@@ -22,6 +22,7 @@
 
 #define BPFJ_FILE_MATCH_CACHED_MAX_RETRIES 32
 #define BPFJ_FILE_MATCH_CACHED_MAX_CHILD_DENTRIES 8
+#define BPFJ_FILE_MATCH_CACHED_CALLER_TRACE_SIZE 8
 
 // Linux packs a dentry name's hash and length into qstr::hash_len. Keep this
 // header self-contained rather than depending on the closed file walker for
@@ -220,6 +221,10 @@ struct bpfj_file_match_cached_state {
   // retry use bpf_loop without a second numeric iterator in the walk frame.
   long retry_result;
   long component_result;
+  // Trace storage is deliberately write-before-read. Zeroing it here adds a
+  // spill slot to verifier-limited matcher callers.
+  __u64 caller_trace;
+  __u8 caller_trace_len;
   __u32 walk_depth;
   __u32 checkpoint_depth;
   bool completed_cycle;
