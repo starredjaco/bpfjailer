@@ -157,6 +157,33 @@ volatile __u64 double_used_after_free_all = 0;
 volatile __u32 double_offsets[DOUBLE_MAX_ALLOCS] = {};
 
 // ---------------------------------------------------------------------------
+// test_heap_grow_native result globals
+// ---------------------------------------------------------------------------
+
+// Rounded to 4 KiB, this many bytes is not a whole number of 16 KiB or 64 KiB
+// pages. Unless the heap grows in native pages, the second grow
+// starts off a native page boundary.
+#define GROW_NATIVE_REQ 300000
+#define GROW_NATIVE_BUDGET_REQ (4U << 20)
+#define GROW_NATIVE_MAX_GROWS 64
+#define GROW_NATIVE_HEAD_MAGIC 0x5a5a5a5a5a5a5a5aULL
+#define GROW_NATIVE_TAIL_MAGIC 0xa5a5a5a5a5a5a5a5ULL
+
+volatile long grow1_ret = 0;
+volatile long grow2_ret = 0;
+volatile __u32 grow1_arena_size = 0;
+volatile __u32 grow2_arena_size = 0;
+volatile __u32 grow_alloc1 = 0;
+volatile __u32 grow_alloc2 = 0;
+volatile int grow_backing_ok = 0;
+volatile __u64 grow_used_after_free = 0;
+volatile __u32 grow_reuse_off = 0;
+volatile long grow_budget_ret = 0;
+volatile __u32 grow_budget_arena_size = 0;
+volatile int grow_tail_page_free = 0;
+volatile __u64 grow_used_after_budget = 0;
+
+// ---------------------------------------------------------------------------
 // test_heap_interleaved result globals
 // ---------------------------------------------------------------------------
 
@@ -977,6 +1004,85 @@ int test_heap_userspace_alloc(void* ctx) {
   }
 
   usalloc_used_after_bpf_free_all = ctrl->current_used;
+
+  done = 1;
+  return 0;
+}
+
+// Two BPF-side grows, each backed by real arena pages, then free/reuse and the
+// backing budget. The kfuncs count native pages. A grow that counts 4 KiB pages
+// over-allocates on larger pages and misaligns the next grow.
+static __always_inline int
+grow_native_probe(void __arena* base, __u32 off, __u32 size) {
+  __u32 last = (off + size - sizeof(__u64)) & ~(__u32)(sizeof(__u64) - 1);
+  __u64 __arena* head = (__u64 __arena*)((char __arena*)base +
+                                         (off & (BPFJ_HEAP_ARENA_SIZE - 1)));
+  __u64 __arena* tail = (__u64 __arena*)((char __arena*)base +
+                                         (last & (BPFJ_HEAP_ARENA_SIZE - 1)));
+  *head = GROW_NATIVE_HEAD_MAGIC;
+  *tail = GROW_NATIVE_TAIL_MAGIC;
+  return *head == GROW_NATIVE_HEAD_MAGIC && *tail == GROW_NATIVE_TAIL_MAGIC;
+}
+
+SEC("syscall")
+int test_heap_grow_native(void* ctx) {
+  if (done)
+    return 0;
+
+  bpfj_heap_use_arena();
+
+  init_ret = 0;
+
+  struct bpfj_heap_control __arena* ctrl = bpfj_heap_get_ctrl();
+  void __arena* base = (void __arena*)ctrl;
+
+  grow1_ret = bpfj_heap_grow(GROW_NATIVE_REQ);
+  grow1_arena_size = ctrl->arena_size;
+  grow2_ret = bpfj_heap_grow(GROW_NATIVE_REQ);
+  grow2_arena_size = ctrl->arena_size;
+
+  // Each grow publishes its own free block, so both allocations fit only if
+  // both grows succeeded.
+  grow_alloc1 = bpfj_heap_alloc(GROW_NATIVE_REQ);
+  grow_alloc2 = bpfj_heap_alloc(GROW_NATIVE_REQ);
+  grow_backing_ok = 0;
+  if (grow_alloc1 != 0 && grow_alloc2 != 0) {
+    grow_backing_ok = grow_native_probe(base, grow_alloc1, GROW_NATIVE_REQ) &&
+        grow_native_probe(base, grow_alloc2, GROW_NATIVE_REQ);
+  }
+
+  if (grow_alloc1 != 0)
+    bpfj_heap_free(grow_alloc1);
+  if (grow_alloc2 != 0)
+    bpfj_heap_free(grow_alloc2);
+  grow_used_after_free = ctrl->current_used;
+
+  grow_reuse_off = bpfj_heap_alloc(GROW_NATIVE_REQ);
+  if (grow_reuse_off != 0)
+    bpfj_heap_free(grow_reuse_off);
+
+  long ret = 0;
+  int i;
+  for (i = 0; i < GROW_NATIVE_MAX_GROWS; i++) {
+    ret = bpfj_heap_grow(GROW_NATIVE_BUDGET_REQ);
+    if (ret != 0)
+      break;
+  }
+  grow_budget_ret = ret;
+  grow_budget_arena_size = ctrl->arena_size;
+  grow_used_after_budget = ctrl->current_used;
+
+  // The first native page past the budget stays free unless a grow
+  // allocated more pages than it published.
+  void* tail = bpf_arena_alloc_pages(
+      &bpfj_heap_arena,
+      (void*)((char __arena*)base + BPFJ_HEAP_MAX_BACKING_SIZE),
+      1,
+      NUMA_NO_NODE,
+      0);
+  grow_tail_page_free = tail != NULL;
+  if (tail)
+    bpf_arena_free_pages(&bpfj_heap_arena, tail, 1);
 
   done = 1;
   return 0;

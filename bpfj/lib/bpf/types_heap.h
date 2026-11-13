@@ -42,6 +42,29 @@ _Static_assert(BPFJ_HEAP_MAX_BACKING_SIZE % BPFJ_HEAP_PAGE_SIZE == 0, "");
 #define BPFJ_HEAP_ARENA_GLOBALS_PAGES 32
 #define BPFJ_HEAP_ARENA_GLOBALS_SIZE \
   ((__u32)BPFJ_HEAP_ARENA_GLOBALS_PAGES * BPFJ_HEAP_PAGE_SIZE)
+
+// The largest native page bpfj_heap_native_page_size_ok() accepts. Every grow
+// starts on a native page only if both sizes are whole pages of it.
+#ifdef __cplusplus
+static_assert(BPFJ_HEAP_MAX_BACKING_SIZE % BPFJ_HEAP_ARENA_GLOBALS_SIZE == 0);
+static_assert(
+    (BPFJ_HEAP_INIT_PAGES * BPFJ_HEAP_PAGE_SIZE) %
+        BPFJ_HEAP_ARENA_GLOBALS_SIZE ==
+    0);
+#else
+_Static_assert(
+    BPFJ_HEAP_MAX_BACKING_SIZE % BPFJ_HEAP_ARENA_GLOBALS_SIZE == 0,
+    "");
+_Static_assert(
+    (BPFJ_HEAP_INIT_PAGES * BPFJ_HEAP_PAGE_SIZE) %
+            BPFJ_HEAP_ARENA_GLOBALS_SIZE ==
+        0,
+    "");
+#endif
+
+// The arena's 4 GiB byte window, counted in 4 KiB pages. The kernel counts
+// arena max_entries in native pages instead, so loaders replace this default
+// with bpfj_heap_arena_max_entries() before creating the map.
 #define BPFJ_HEAP_ARENA_MAP_PAGES (1U << 20)
 #define BPFJ_HEAP_ARENA_SIZE \
   (1ULL * BPFJ_HEAP_ARENA_MAP_PAGES * BPFJ_HEAP_PAGE_SIZE)
@@ -140,6 +163,28 @@ struct bpfj_heap_syscall_req {
 #define __always_inline inline __attribute__((always_inline))
 #endif
 
+// Shared helpers: native page sizing
+
+// Whether the arena can use `page_size` native pages. It must be a power of two
+// from BPFJ_HEAP_PAGE_SIZE up to the globals reservation. Then it divides every
+// heap size constant and the byte window.
+// NOLINTNEXTLINE(*-NamespaceScopedStaticDeclaration) BPF C needs it
+static __always_inline int bpfj_heap_native_page_size_ok(__u64 page_size) {
+  return page_size >= BPFJ_HEAP_PAGE_SIZE &&
+      page_size <= BPFJ_HEAP_ARENA_GLOBALS_SIZE &&
+      (page_size & (page_size - 1)) == 0;
+}
+
+// The arena max_entries that spans BPFJ_HEAP_ARENA_SIZE bytes in `page_size`
+// native pages, or 0 if that page size is unsupported.
+// NOLINTNEXTLINE(*-NamespaceScopedStaticDeclaration) BPF C needs it
+static __always_inline __u32 bpfj_heap_arena_max_entries(__u64 page_size) {
+  if (!bpfj_heap_native_page_size_ok(page_size)) {
+    return 0;
+  }
+  return (__u32)(BPFJ_HEAP_ARENA_SIZE / page_size);
+}
+
 // Shared helpers: address arithmetic
 
 static __always_inline __u32 bpfj_heap_clamp_off(__u32 offset) {
@@ -201,9 +246,12 @@ static __always_inline __u32 bpfj_heap_fls(__u32 x) {
   return 31 - __builtin_clz(x);
 }
 
+// Bytes to grow the heap by to fit `min_bytes`, or 0. The result is a whole
+// number of `page_size` native pages, so every grow starts on a page boundary.
 static __always_inline __u32
-bpfj_heap_growth_size(__u32 min_bytes, __u32 arena_size) {
-  if (min_bytes == 0 || arena_size >= BPFJ_HEAP_MAX_BACKING_SIZE) {
+bpfj_heap_growth_size(__u32 min_bytes, __u32 arena_size, __u64 page_size) {
+  if (min_bytes == 0 || arena_size >= BPFJ_HEAP_MAX_BACKING_SIZE ||
+      !bpfj_heap_native_page_size_ok(page_size)) {
     return 0;
   }
 
@@ -215,6 +263,7 @@ bpfj_heap_growth_size(__u32 min_bytes, __u32 arena_size) {
   }
 
   __u64 bytes = pages * BPFJ_HEAP_PAGE_SIZE;
+  bytes = (bytes + page_size - 1) & ~(page_size - 1);
   __u32 remaining = BPFJ_HEAP_MAX_BACKING_SIZE - arena_size;
   return bytes > remaining ? remaining : (__u32)bytes;
 }

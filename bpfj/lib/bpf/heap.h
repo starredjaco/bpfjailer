@@ -18,6 +18,7 @@
 
 // Sized above the heap's ceiling so libbpf's __arena globals land in the
 // reserved tail rather than in heap memory (see BPFJ_HEAP_ARENA_MAP_PAGES).
+// The declared count assumes 4 KiB pages. Loaders resize it to native pages.
 struct {
   __uint(type, BPF_MAP_TYPE_ARENA);
   __uint(map_flags, BPF_F_MMAPABLE);
@@ -45,6 +46,17 @@ volatile const bool bpfj_heap_enabled = true;
 static __always_inline struct bpfj_heap_control __arena* bpfj_heap_get_ctrl(
     void) {
   return bpfj_heap_ctrl;
+}
+
+// The kernel's page size, which the arena page kfuncs count in. Derived from
+// the map rather than set per skeleton, since loaders size max_entries so the
+// map spans BPFJ_HEAP_ARENA_SIZE bytes. 0 if max_entries cannot do that.
+static __always_inline __u64 bpfj_heap_native_page_size(void) {
+  __u32 entries = ((struct bpf_map*)&bpfj_heap_arena)->max_entries;
+  if (entries == 0 || BPFJ_HEAP_ARENA_SIZE % entries != 0) {
+    return 0;
+  }
+  return BPFJ_HEAP_ARENA_SIZE / entries;
 }
 
 // Associate the arena map with the current BPF program so the verifier permits
@@ -123,11 +135,15 @@ __noinline long bpfj_heap_grow(u32 min_bytes) {
     return -ENOMEM;
   }
 
-  u32 new_block_size = bpfj_heap_growth_size(min_bytes, old_arena_size);
+  // growth_size() rejects an unsupported page size. It returns a whole number
+  // of native pages, so every grow starts on a native page boundary.
+  u64 page_size = bpfj_heap_native_page_size();
+  u32 new_block_size =
+      bpfj_heap_growth_size(min_bytes, old_arena_size, page_size);
   if (new_block_size == 0) {
     return -ENOMEM;
   }
-  u32 pages_needed = new_block_size / BPFJ_HEAP_PAGE_SIZE;
+  u32 pages_needed = new_block_size / page_size;
   u64 new_arena_size = (u64)old_arena_size + new_block_size;
 
   void* ret = bpf_arena_alloc_pages(
@@ -189,7 +205,8 @@ __noinline long bpfj_heap_grow_preallocated(
     return -ENOMEM;
   }
 
-  u32 new_block_size = bpfj_heap_growth_size(min_bytes, expected_arena_size);
+  u32 new_block_size = bpfj_heap_growth_size(
+      min_bytes, expected_arena_size, bpfj_heap_native_page_size());
   if (new_block_size == 0) {
     return -ENOMEM;
   }

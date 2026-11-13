@@ -4,10 +4,13 @@
 
 #include <errno.h>
 #include <sys/utsname.h>
+#include <unistd.h>
+#include <cstdint>
 #include <cstdio>
 #include <memory>
 #include <mutex>
 #include <utility>
+#include "bpfj/lib/bpf/types_heap.h"
 #include "bpfj/libbpf-cpp/BpfSkelBase.h"
 
 namespace bpfj::libbpf {
@@ -46,6 +49,29 @@ inline bool kernelSupportsHeapSyscall() noexcept {
     return false;
   }
   return major > 6 || (major == 6 && minor >= 11);
+}
+
+// bpfj_heap_arena declares its byte window in 4 KiB pages. The kernel counts
+// arena max_entries in native pages and rejects a window over 4 GiB.
+inline std::uint32_t heapArenaMaxEntries(long pageSize) noexcept {
+  return pageSize > 0
+      ? bpfj_heap_arena_max_entries(static_cast<std::uint64_t>(pageSize))
+      : 0;
+}
+
+inline std::uint32_t heapArenaMaxEntries() noexcept {
+  return heapArenaMaxEntries(::sysconf(_SC_PAGESIZE));
+}
+
+// Sizes bpfj_heap_arena to `entries` with `setMaxEntries`, and returns false
+// if that fails. 0 means an unsupported page size. Then the arena keeps its
+// declared size, so that a loader can still turn the arena off. heap::init()
+// rejects that size.
+template <typename SetMaxEntries>
+[[nodiscard]] bool sizeHeapArena(
+    std::uint32_t entries,
+    const SetMaxEntries& setMaxEntries) noexcept {
+  return entries == 0 || setMaxEntries(entries) == 0;
 }
 
 } // namespace detail
@@ -110,10 +136,11 @@ class BpfSkel final : public BpfSkelBase {
   }
 
   void detach() noexcept override {
-    // The generated Skel::detach() dereferences its argument unconditionally,
-    // so detaching a never-opened or destroyed skeleton faults. Not a race
-    // guard -- skel_ is a plain pointer -- so serializing the two is the
-    // caller's job; see T286128772 for the BpfHandler::stop() gap.
+    // The generated Skel::detach() dereferences its argument unconditionally.
+    // Detaching a skeleton that was never opened, or that was destroyed,
+    // faults. This null check is not a race guard, because skel_ is a plain
+    // pointer. Callers must keep the skeleton alive and serialize detach()
+    // with destroy(). BpfHandler::stop() relies on its caller for this.
     if (!skel_) {
       return;
     }
@@ -199,6 +226,20 @@ class BpfSkel final : public BpfSkelBase {
               std::errc::invalid_argument,
               "failed to disable unsupported heap syscall program"));
         }
+      }
+    }
+
+    // Every loader of an arena-backed skeleton opens it here, so size the
+    // arena once for all of them. A reused fd replaces this with its own size.
+    if constexpr (requires { skel_->maps.bpfj_heap_arena; }) {
+      auto* const arena = skel_->maps.bpfj_heap_arena;
+      if (!detail::sizeHeapArena(
+              detail::heapArenaMaxEntries(), [arena](std::uint32_t entries) {
+                return bpf_map__set_max_entries(arena, entries);
+              })) {
+        return makeUnexpected(makeError(
+            std::errc::invalid_argument,
+            "failed to size the heap arena in native pages"));
       }
     }
 

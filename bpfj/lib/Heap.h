@@ -8,6 +8,7 @@
 // BPF global, which is how both worlds find the arena.
 
 #include <sys/mman.h>
+#include <unistd.h>
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
@@ -26,6 +27,22 @@ namespace bpfjailer::heap {
 // Shared userspace structures other than the heap use this bounded wait for
 // their own arena locks.
 constexpr auto kLockTimeout = std::chrono::seconds{5};
+
+// The kernel's page size, which the arena counts max_entries in.
+inline std::uint64_t nativePageSize() noexcept {
+  static const long pageSize = ::sysconf(_SC_PAGESIZE);
+  return pageSize > 0 ? static_cast<std::uint64_t>(pageSize) : 0;
+}
+
+// Whether an arena of `maxEntries` native pages of `pageSize` spans the heap
+// window. It never does for an unsupported page size, so a loader without an
+// arena gate fails instead of running the heap there.
+inline bool arenaSpansWindow(
+    std::uint32_t maxEntries,
+    std::uint64_t pageSize) noexcept {
+  const std::uint32_t want = bpfj_heap_arena_max_entries(pageSize);
+  return want != 0 && maxEntries == want;
+}
 
 template <typename T>
 concept BpfSkelWithHeap = requires(T obj) { obj.bss().bpfj_heap_ctrl; };
@@ -58,6 +75,13 @@ err::Expected<> init(Skel& obj) {
   __u32 infoLen = sizeof(info);
   if (mapFd < 0 || bpf_obj_get_info_by_fd(mapFd, &info, &infoLen) != 0) {
     return err::Error::fromErrno("Failed to inspect arena map");
+  }
+  // Userspace grows in nativePageSize() pages, and BPF in pages derived from
+  // max_entries. Both must describe the same byte window.
+  if (!arenaSpansWindow(info.max_entries, nativePageSize())) {
+    return err::Error(
+        std::errc::invalid_argument,
+        "Arena max_entries does not span the arena in native pages");
   }
   if (info.map_extra != 0) {
     void* const arenaBase = reinterpret_cast<void*>(info.map_extra);
@@ -166,7 +190,8 @@ inline long allocOffset(int progFd, void* arena, __u32 size) {
     std::lock_guard guard{growMutex};
     auto* ctrl = static_cast<struct bpfj_heap_control*>(arena);
     const __u32 oldSize = ctrl->arena_size;
-    const __u32 growSize = bpfj_heap_growth_size(size, oldSize);
+    const __u32 growSize =
+        bpfj_heap_growth_size(size, oldSize, nativePageSize());
     if (growSize == 0) {
       return -ENOMEM;
     }
@@ -283,7 +308,7 @@ inline __u32 currentUsed(Skel&& skel) {
   return static_cast<__u32>(ctrl->current_used);
 }
 
-// Heap usage stats read from the arena control structure, for ODS counters.
+// Heap usage stats read from the arena control structure, for metrics counters.
 struct Stats {
   __u32 arenaSize;
   __u64 currentUsed;
@@ -291,9 +316,9 @@ struct Stats {
   __u64 totalFree;
 };
 
-/// Read heap usage stats for ODS reporting, or nullopt when the arena is not
-/// readable here. bpfj_heap_ctrl is null until init() publishes the base, so
-/// it doubles as the "initialized" gate and is never dereferenced unchecked.
+/// Read heap usage stats for metrics reporting, or nullopt when the arena is
+/// not readable here. bpfj_heap_ctrl is null until init() publishes the base,
+/// so it doubles as the "initialized" gate and is never dereferenced unchecked.
 template <typename Obj>
 std::optional<Stats> readStats(Obj& obj) {
   if (!obj->rodata().bpfj_heap_enabled) {

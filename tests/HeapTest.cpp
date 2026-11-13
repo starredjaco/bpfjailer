@@ -4,6 +4,7 @@
 #include "tests/Harness.h"
 
 #include <chrono>
+#include <cstdint>
 #include <limits>
 #include <thread>
 #include <vector>
@@ -73,6 +74,67 @@ TEST(Heap, AddressCapacityIsIndependentOfBackingBudget) {
   for (const auto offset : invalidOffsets) {
     ASSERT(heap::offsetToPtr(base, offset) == nullptr);
   }
+}
+
+// Arena max_entries counts native pages. The entry count, not the byte window,
+// scales with the page size: 64 KiB pages need 65536 entries.
+TEST(Heap, ArenaMaxEntriesSpansTheWindowInNativePages) {
+  struct Case {
+    std::uint64_t pageSize;
+    std::uint32_t entries;
+  };
+  constexpr Case cases[] = {
+      {4096, 1U << 20},
+      {16384, 1U << 18},
+      {65536, 1U << 16},
+  };
+  constexpr std::uint64_t kKernelArenaCap = 1ULL << 32;
+  for (const auto& c : cases) {
+    const std::uint32_t entries = bpfj_heap_arena_max_entries(c.pageSize);
+    ASSERT_EQ(entries, c.entries);
+    ASSERT_EQ(entries * c.pageSize, BPFJ_HEAP_ARENA_SIZE);
+    ASSERT_LE(entries * c.pageSize, kKernelArenaCap);
+    ASSERT_EQ(bpfjailer::arena::kWindowBase % c.pageSize, 0U);
+    ASSERT_EQ(bpfjailer::arena::kSlotSize % c.pageSize, 0U);
+    ASSERT_EQ(BPFJ_HEAP_ARENA_GLOBALS_SIZE % c.pageSize, 0U);
+    ASSERT_EQ(BPFJ_HEAP_MAX_BACKING_SIZE % c.pageSize, 0U);
+  }
+
+  const std::uint64_t unsupported[] = {
+      0, 2048, 12288, 2ULL * BPFJ_HEAP_ARENA_GLOBALS_SIZE};
+  for (const auto pageSize : unsupported) {
+    ASSERT_EQ(bpfj_heap_arena_max_entries(pageSize), 0U);
+  }
+}
+
+// Every grow is a whole number of native pages. Consecutive grows stay on
+// native page boundaries up to the backing budget.
+TEST(Heap, GrowthSizeIsAWholeNumberOfNativePages) {
+  constexpr std::uint32_t kInit = BPFJ_HEAP_INIT_PAGES * BPFJ_HEAP_PAGE_SIZE;
+  const std::uint64_t pageSizes[] = {4096, 16384, 65536};
+  const std::uint32_t requests[] = {1, 300000, 4U << 20};
+  for (const auto pageSize : pageSizes) {
+    for (const auto request : requests) {
+      std::uint32_t arenaSize = kInit;
+      for (int grow = 0; grow < 2; ++grow) {
+        const std::uint32_t bytes =
+            bpfj_heap_growth_size(request, arenaSize, pageSize);
+        ASSERT_GE(bytes, request);
+        ASSERT_EQ(bytes % pageSize, 0U);
+        arenaSize += bytes;
+        ASSERT_EQ(arenaSize % pageSize, 0U);
+      }
+    }
+
+    // The last grow is clamped to the remaining budget, then growth stops.
+    const std::uint32_t last = BPFJ_HEAP_MAX_BACKING_SIZE - pageSize;
+    ASSERT_EQ(bpfj_heap_growth_size(4U << 20, last, pageSize), pageSize);
+    ASSERT_EQ(
+        bpfj_heap_growth_size(1, BPFJ_HEAP_MAX_BACKING_SIZE, pageSize), 0U);
+  }
+
+  ASSERT_EQ(bpfj_heap_growth_size(1, kInit, 0), 0U);
+  ASSERT_EQ(bpfj_heap_growth_size(1, kInit, 12288), 0U);
 }
 
 TEST(Heap, AllocFreeReturnsToBaseline) {

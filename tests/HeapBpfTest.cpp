@@ -5,7 +5,10 @@
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 
+#include <unistd.h>
+
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <functional>
 #include <memory>
@@ -429,6 +432,55 @@ TEST(HeapBpf, TestDouble) {
 }
 
 // ---------------------------------------------------------------------------
+// Test: BPF-side growth in native pages
+// ---------------------------------------------------------------------------
+
+TEST(HeapBpf, TestGrowUsesNativePages) {
+  std::shared_ptr<bpfj::libbpf::BpfSkel<heap_bpf_test_bpf>> obj;
+
+  auto handler = runHeapTest(
+      obj, [&]() { enableOnly(*obj, obj->progs().test_heap_grow_native); });
+  ASSERT_NE(handler, nullptr);
+
+  ASSERT_EQ(obj->bss().init_ret, 0);
+  ASSERT_EQ(obj->bss().done, 1);
+
+  // The kernel counts arena entries in native pages. The byte window stays
+  // 4 GiB.
+  const long pageSize = ::sysconf(_SC_PAGESIZE);
+  ASSERT_GT(pageSize, 0L);
+  const auto page = static_cast<std::uint64_t>(pageSize);
+  ASSERT_EQ(
+      bpf_map__max_entries(obj->maps().bpfj_heap_arena) * page,
+      BPFJ_HEAP_ARENA_SIZE);
+
+  constexpr std::uint32_t kReq = 300000;
+  constexpr std::uint32_t kInit = BPFJ_HEAP_INIT_PAGES * BPFJ_HEAP_PAGE_SIZE;
+  ASSERT_EQ(obj->bss().grow1_ret, 0L);
+  ASSERT_EQ(obj->bss().grow2_ret, 0L);
+  ASSERT_GE(obj->bss().grow1_arena_size, kInit + kReq);
+  ASSERT_GE(obj->bss().grow2_arena_size, obj->bss().grow1_arena_size + kReq);
+  ASSERT_EQ(obj->bss().grow1_arena_size % page, 0U);
+  ASSERT_EQ(obj->bss().grow2_arena_size % page, 0U);
+
+  ASSERT_NE(obj->bss().grow_alloc1, 0U);
+  ASSERT_NE(obj->bss().grow_alloc2, 0U);
+  ASSERT_GE(obj->bss().grow_alloc1, kInit);
+  ASSERT_GE(obj->bss().grow_alloc2, kInit);
+  ASSERT_EQ(obj->bss().grow_backing_ok, 1);
+
+  ASSERT_EQ(obj->bss().grow_used_after_free, 0U);
+  ASSERT(
+      obj->bss().grow_reuse_off == obj->bss().grow_alloc1 ||
+      obj->bss().grow_reuse_off == obj->bss().grow_alloc2);
+
+  ASSERT_EQ(obj->bss().grow_budget_ret, static_cast<long>(-ENOMEM));
+  ASSERT_EQ(obj->bss().grow_budget_arena_size, BPFJ_HEAP_MAX_BACKING_SIZE);
+  ASSERT_EQ(obj->bss().grow_used_after_budget, 0U);
+  ASSERT_EQ(obj->bss().grow_tail_page_free, 1);
+}
+
+// ---------------------------------------------------------------------------
 // Test: interleaved alloc/free pattern
 // ---------------------------------------------------------------------------
 
@@ -682,4 +734,37 @@ TEST(HeapBpf, TestUserspaceAllocReadFromBpf) {
 
   // After freeing everything, used should be 0
   ASSERT_EQ(obj->bss().usalloc_used_after_bpf_free_all, 0U);
+}
+
+// ---------------------------------------------------------------------------
+// Test: arena sizing at open
+// ---------------------------------------------------------------------------
+
+// The open source loaders have no arena gate. On an unsupported page size, the
+// open keeps the declared arena size, and heap::init() rejects it.
+TEST(HeapBpf, TestOpenSizesTheArena) {
+  namespace detail = bpfj::libbpf::detail;
+  std::unique_ptr<heap_bpf_test_bpf, decltype(&heap_bpf_test_bpf__destroy)>
+      skel{heap_bpf_test_bpf__open(), &heap_bpf_test_bpf__destroy};
+  ASSERT(skel != nullptr);
+  struct bpf_map* const arena = skel->maps.bpfj_heap_arena;
+  const auto set = [arena](std::uint32_t entries) {
+    return bpf_map__set_max_entries(arena, entries);
+  };
+
+  const long unsupported = 2L * BPFJ_HEAP_ARENA_GLOBALS_SIZE;
+  ASSERT_TRUE(
+      detail::sizeHeapArena(detail::heapArenaMaxEntries(unsupported), set));
+  ASSERT_EQ(bpf_map__max_entries(arena), BPFJ_HEAP_ARENA_MAP_PAGES);
+  ASSERT_FALSE(
+      heap::arenaSpansWindow(bpf_map__max_entries(arena), unsupported));
+
+  ASSERT_TRUE(detail::sizeHeapArena(detail::heapArenaMaxEntries(65536), set));
+  ASSERT_EQ(bpf_map__max_entries(arena), 1U << 16);
+  ASSERT_TRUE(heap::arenaSpansWindow(bpf_map__max_entries(arena), 65536));
+
+  ASSERT_FALSE(
+      detail::sizeHeapArena(
+          detail::heapArenaMaxEntries(65536),
+          [](std::uint32_t) { return -EBUSY; }));
 }
